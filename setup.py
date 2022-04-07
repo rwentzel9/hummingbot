@@ -33,7 +33,7 @@ class BuildExt(build_ext):
 
 def main():
     cpu_count = os.cpu_count() or 8
-    version = "20211201"
+    version = "20220330"
     packages = find_packages(include=["hummingbot", "hummingbot.*"])
     package_data = {
         "hummingbot": [
@@ -50,8 +50,9 @@ def main():
         "aiohttp",
         "aiokafka",
         "appdirs",
-        "appnope"
-        "sync-timeout",
+        "appnope",
+        "async-timeout",
+        "bidict",
         "cachetools",
         "certifi",
         "cryptography",
@@ -79,8 +80,7 @@ def main():
         "psutil",
         "pyjwt",
         "pyperclip",
-        "python-binance==0.7.5",
-        "python-dateutil"
+        "python-dateutil",
         "python-telegram-bot",
         "requests",
         "rsa",
@@ -90,6 +90,7 @@ def main():
         "simplejson",
         "six",
         "sqlalchemy",
+        "tabulate",
         "tzlocal",
         "ujson",
         "web3",

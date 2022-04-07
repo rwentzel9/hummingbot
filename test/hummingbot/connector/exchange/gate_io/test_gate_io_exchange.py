@@ -11,11 +11,11 @@ from aioresponses import aioresponses
 
 from hummingbot.connector.exchange.gate_io import gate_io_constants as CONSTANTS
 from hummingbot.connector.exchange.gate_io.gate_io_exchange import GateIoExchange
-from hummingbot.core.network_iterator import NetworkStatus
-
 from hummingbot.connector.exchange.gate_io.gate_io_in_flight_order import GateIoInFlightOrder
+from hummingbot.core.data_type.common import OrderType, TradeType
 from hummingbot.core.event.event_logger import EventLogger
-from hummingbot.core.event.events import MarketEvent, TradeType, OrderType
+from hummingbot.core.event.events import MarketEvent
+from hummingbot.core.network_iterator import NetworkStatus
 from test.hummingbot.connector.network_mocking_assistant import NetworkMockingAssistant
 
 
@@ -131,6 +131,7 @@ class TestGateIoExchange(unittest.TestCase):
             TradeType.BUY,
             price=Decimal("5.1"),
             amount=Decimal("1"),
+            creation_timestamp=1640001112.0
         )
         return order
 
@@ -274,36 +275,6 @@ class TestGateIoExchange(unittest.TestCase):
         event = self.event_listener.event_log[0]
 
         self.assertEqual(order_id, event.order_id)
-        self.assertTrue(order_id in self.exchange.in_flight_orders)
-
-    @aioresponses()
-    def test_create_order_when_order_is_instantly_closed(self, mock_api):
-        trading_rules = self.get_trading_rules_mock()
-        self.exchange._trading_rules = self.exchange._format_trading_rules(trading_rules)
-
-        url = f"{CONSTANTS.REST_URL}/{CONSTANTS.ORDER_CREATE_PATH_URL}"
-        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
-        resp = self.get_order_create_response_mock()
-        resp["status"] = "closed"
-        mock_api.post(regex_url, body=json.dumps(resp))
-
-        event_logger = EventLogger()
-        self.exchange.add_listener(MarketEvent.BuyOrderCreated, event_logger)
-
-        order_id = "someId"
-        self.async_run_with_timeout(
-            coroutine=self.exchange._create_order(
-                trade_type=TradeType.BUY,
-                order_id=order_id,
-                trading_pair=self.trading_pair,
-                amount=Decimal("1"),
-                order_type=OrderType.LIMIT,
-                price=Decimal("5.1"),
-            )
-        )
-
-        self.assertEqual(1, len(event_logger.event_log))
-        self.assertEqual(order_id, event_logger.event_log[0].order_id)
         self.assertTrue(order_id in self.exchange.in_flight_orders)
 
     @aioresponses()

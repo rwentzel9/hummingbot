@@ -1,5 +1,5 @@
-from decimal import Decimal
 import logging
+from decimal import Decimal
 from typing import Any
 
 from hummingbot.core.utils.estimate_fee import estimate_fee
@@ -90,17 +90,22 @@ class ArbProposal:
                 sell_quote_eth_rate = (first_side_quote_eth_rate
                                        if not self.first_side.is_buy
                                        else second_side_quote_eth_rate)
-                if buy_quote_eth_rate is not None and buy_trade_fee.flat_fees[0][0].upper() == "ETH":
-                    buy_fee_amount = buy_trade_fee.flat_fees[0][1] / buy_quote_eth_rate
+                if buy_quote_eth_rate is not None and buy_trade_fee.flat_fees[0].token.upper() == "ETH":
+                    buy_fee_amount = buy_trade_fee.flat_fees[0].amount / buy_quote_eth_rate
                 else:
-                    buy_fee_amount = buy_trade_fee.fee_amount_in_quote(buy.market_info.trading_pair,
-                                                                       buy.quote_price, buy.amount)
-                if sell_quote_eth_rate is not None and sell_trade_fee.flat_fees[0][0].upper() == "ETH":
-                    sell_fee_amount = sell_trade_fee.flat_fees[0][1] / sell_quote_eth_rate
+                    buy_fee_amount = buy_trade_fee.fee_amount_in_token(buy.market_info.trading_pair,
+                                                                       buy.quote_price,
+                                                                       buy.amount,
+                                                                       token=buy.market_info.quote_asset,
+                                                                       rate_source=rate_source)
+                if sell_quote_eth_rate is not None and sell_trade_fee.flat_fees[0].token.upper() == "ETH":
+                    sell_fee_amount = sell_trade_fee.flat_fees[0].amount / sell_quote_eth_rate
                 else:
-                    sell_fee_amount = sell_trade_fee.fee_amount_in_quote(sell.market_info.trading_pair,
+                    sell_fee_amount = sell_trade_fee.fee_amount_in_token(sell.market_info.trading_pair,
                                                                          sell.quote_price,
-                                                                         sell.amount)
+                                                                         sell.amount,
+                                                                         token=sell.market_info.quote_asset,
+                                                                         rate_source=rate_source)
 
             buy_spent_net = (buy.amount * buy.quote_price) + buy_fee_amount
             sell_gained_net = (sell.amount * sell.quote_price) - sell_fee_amount

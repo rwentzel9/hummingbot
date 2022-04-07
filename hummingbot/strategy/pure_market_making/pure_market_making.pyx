@@ -1,48 +1,45 @@
-from decimal import Decimal
 import logging
-import pandas as pd
-import numpy as np
-from typing import (
-    List,
-    Dict,
-    Optional
-)
-from math import (
-    floor,
-    ceil
-)
 import time
+from decimal import Decimal
+from math import (
+    ceil,
+    floor,
+)
+from typing import (
+    Dict,
+    List,
+    Optional,
+)
+
+import numpy as np
+import pandas as pd
+
+from hummingbot.connector.exchange_base import ExchangeBase
+from hummingbot.connector.exchange_base cimport ExchangeBase
 from hummingbot.core.clock cimport Clock
-from hummingbot.core.event.events import TradeType, PriceType
+from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.core.data_type.limit_order cimport LimitOrder
 from hummingbot.core.data_type.limit_order import LimitOrder
 from hummingbot.core.network_iterator import NetworkStatus
-from hummingbot.connector.exchange_base import ExchangeBase
-from hummingbot.connector.exchange_base cimport ExchangeBase
-from hummingbot.core.event.events import OrderType
 from hummingbot.core.utils import map_df_to_str
-
-from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
-from hummingbot.strategy.strategy_base import StrategyBase
-from hummingbot.client.config.global_config_map import global_config_map
-from hummingbot.strategy.utils import order_age
-from .data_types import (
-    Proposal,
-    PriceSize
-)
-from .pure_market_making_order_tracker import PureMarketMakingOrderTracker
-
-from hummingbot.strategy.hanging_orders_tracker import (
-    CreatedPairOfOrders,
-    HangingOrdersTracker)
-
 from hummingbot.strategy.asset_price_delegate cimport AssetPriceDelegate
 from hummingbot.strategy.asset_price_delegate import AssetPriceDelegate
+from hummingbot.strategy.hanging_orders_tracker import (
+    CreatedPairOfOrders,
+    HangingOrdersTracker,
+)
+from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
+from hummingbot.strategy.order_book_asset_price_delegate cimport OrderBookAssetPriceDelegate
+from hummingbot.strategy.strategy_base import StrategyBase
+from hummingbot.strategy.utils import order_age
+from .data_types import (
+    PriceSize,
+    Proposal,
+)
+from .inventory_cost_price_delegate import InventoryCostPriceDelegate
 from .inventory_skew_calculator cimport c_calculate_bid_ask_ratios_from_base_asset_ratio
 from .inventory_skew_calculator import calculate_total_order_size
-from hummingbot.strategy.order_book_asset_price_delegate cimport OrderBookAssetPriceDelegate
-from .inventory_cost_price_delegate import InventoryCostPriceDelegate
-
+from .pure_market_making_order_tracker import PureMarketMakingOrderTracker
 
 NaN = float("nan")
 s_decimal_zero = Decimal(0)
@@ -95,9 +92,14 @@ cdef class PureMarketMakingStrategy(StrategyBase):
                     status_report_interval: float = 900,
                     minimum_spread: Decimal = Decimal(0),
                     hb_app_notification: bool = False,
-                    order_override: Dict[str, List[str]] = {},
+                    order_override: Dict[str, List[str]] = None,
+                    split_order_levels_enabled: bool = False,
+                    bid_order_level_spreads: List[Decimal] = None,
+                    ask_order_level_spreads: List[Decimal] = None,
                     should_wait_order_cancel_confirmation = True,
                     ):
+        if order_override is None:
+            order_override = {}
         if price_ceiling != s_decimal_neg_one and price_ceiling < price_floor:
             raise ValueError("Parameter price_ceiling cannot be lower than price_floor.")
         self._sb_order_tracker = PureMarketMakingOrderTracker()
@@ -134,7 +136,9 @@ cdef class PureMarketMakingStrategy(StrategyBase):
         self._ping_pong_warning_lines = []
         self._hb_app_notification = hb_app_notification
         self._order_override = order_override
-
+        self._split_order_levels_enabled=split_order_levels_enabled
+        self._bid_order_level_spreads=bid_order_level_spreads
+        self._ask_order_level_spreads=ask_order_level_spreads
         self._cancel_timestamp = 0
         self._create_timestamp = 0
         self._limit_order_type = self._market_info.market.get_maker_order_type()
@@ -368,6 +372,18 @@ cdef class PureMarketMakingStrategy(StrategyBase):
     def order_override(self):
         return self._order_override
 
+    @property
+    def split_order_levels_enabled(self):
+        return self._split_order_levels_enabled
+
+    @property
+    def bid_order_level_spreads(self):
+        return self._bid_order_level_spreads
+
+    @property
+    def ask_order_level_spreads(self):
+        return self._ask_order_level_spreads
+
     @order_override.setter
     def order_override(self, value: Dict[str, List[str]]):
         self._order_override = value
@@ -557,7 +573,7 @@ cdef class PureMarketMakingStrategy(StrategyBase):
             age = "n/a"
             # // indicates order is a paper order so 'n/a'. For real orders, calculate age.
             if "//" not in order.client_order_id:
-                age = pd.Timestamp(int(time.time()) - int(order.client_order_id[-16:])/1e6,
+                age = pd.Timestamp(int(time.time() - (order.creation_timestamp/1e6)),
                                    unit='s').strftime('%H:%M:%S')
 
             if is_hanging_order:
@@ -673,8 +689,7 @@ cdef class PureMarketMakingStrategy(StrategyBase):
             for order_id in restored_order_ids:
                 order = next(o for o in self.market_info.market.limit_orders if o.client_order_id == order_id)
                 if order:
-                    self._hanging_orders_tracker.add_order(order)
-                    self._hanging_orders_tracker.update_strategy_orders_with_equivalent_orders()
+                    self._hanging_orders_tracker.add_as_hanging_order(order)
 
     cdef c_stop(self, Clock clock):
         self._hanging_orders_tracker.unregister_events(self.active_markets)
@@ -967,6 +982,11 @@ cdef class PureMarketMakingStrategy(StrategyBase):
             proposal.buys = sorted(proposal.buys, key = lambda p: p.price, reverse = True)
             lower_buy_price = min(proposal.buys[0].price, price_above_bid)
             for i, proposed in enumerate(proposal.buys):
+                if self._split_order_levels_enabled:
+                    proposal.buys[i].price = (market.c_quantize_order_price(self.trading_pair, lower_buy_price) 
+                                              * (1 - self._bid_order_level_spreads[i] / Decimal("100")) 
+                                              / (1-self._bid_order_level_spreads[0] / Decimal("100")))
+                    continue
                 proposal.buys[i].price = market.c_quantize_order_price(self.trading_pair, lower_buy_price) * (1 - self.order_level_spread * i)
 
         if len(proposal.sells) > 0:
@@ -985,6 +1005,11 @@ cdef class PureMarketMakingStrategy(StrategyBase):
             proposal.sells = sorted(proposal.sells, key = lambda p: p.price)
             higher_sell_price = max(proposal.sells[0].price, price_below_ask)
             for i, proposed in enumerate(proposal.sells):
+                if self._split_order_levels_enabled:
+                    proposal.sells[i].price = (market.c_quantize_order_price(self.trading_pair, higher_sell_price) 
+                                               * (1 + self._ask_order_level_spreads[i] / Decimal("100")) 
+                                               / (1 + self._ask_order_level_spreads[0] / Decimal("100")))
+                    continue
                 proposal.sells[i].price = market.c_quantize_order_price(self.trading_pair, higher_sell_price) * (1 + self.order_level_spread * i)
 
     cdef object c_apply_add_transaction_costs(self, object proposal):
