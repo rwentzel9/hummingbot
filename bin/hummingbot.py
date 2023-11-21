@@ -1,45 +1,36 @@
 #!/usr/bin/env python
 
 import asyncio
-import errno
-import socket
-from typing import Coroutine, List
-from weakref import ref, ReferenceType
+from typing import Coroutine, List, Optional
+from weakref import ReferenceType, ref
 
 import path_util  # noqa: F401
+
 from hummingbot import chdir_to_data_directory, init_logging
+from hummingbot.client.config.client_config_map import ClientConfigMap
+from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
 from hummingbot.client.config.config_helpers import (
-    create_yml_files,
-    read_system_configs_from_yml,
+    ClientConfigAdapter,
+    create_yml_files_legacy,
+    load_client_config_map_from_file,
     write_config_to_yml,
 )
-from hummingbot.client.config.global_config_map import global_config_map
 from hummingbot.client.hummingbot_application import HummingbotApplication
 from hummingbot.client.settings import AllConnectorSettings
 from hummingbot.client.ui import login_prompt
+from hummingbot.client.ui.style import load_style
 from hummingbot.core.event.event_listener import EventListener
 from hummingbot.core.event.events import HummingbotUIEvent
+from hummingbot.core.utils import detect_available_port
 from hummingbot.core.utils.async_utils import safe_gather
 
 
-def detect_available_port(starting_port: int) -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        current_port: int = starting_port
-        while current_port < 65535:
-            try:
-                s.bind(("127.0.0.1", current_port))
-                break
-            except OSError as e:
-                if e.errno == errno.EADDRINUSE:
-                    current_port += 1
-                    continue
-        return current_port
-
-
 class UIStartListener(EventListener):
-    def __init__(self, hummingbot_app: HummingbotApplication):
+    def __init__(self, hummingbot_app: HummingbotApplication, is_script: Optional[bool] = False, is_quickstart: Optional[bool] = False):
         super().__init__()
         self._hb_ref: ReferenceType = ref(hummingbot_app)
+        self._is_script = is_script
+        self._is_quickstart = is_quickstart
 
     def __call__(self, _):
         asyncio.create_task(self.ui_start_handler())
@@ -50,23 +41,23 @@ class UIStartListener(EventListener):
 
     async def ui_start_handler(self):
         hb: HummingbotApplication = self.hummingbot_app
+        if hb.strategy_name is not None:
+            if not self._is_script:
+                write_config_to_yml(hb.strategy_config_map, hb.strategy_file_name, hb.client_config_map)
+            hb.start(log_level=hb.client_config_map.log_level,
+                     script=hb.strategy_name if self._is_script else None,
+                     is_quickstart=self._is_quickstart)
 
-        if hb.strategy_file_name is not None and hb.strategy_name is not None:
-            await write_config_to_yml(hb.strategy_name, hb.strategy_file_name)
-            hb.start(global_config_map.get("log_level").value)
 
-
-async def main():
-    await create_yml_files()
+async def main_async(client_config_map: ClientConfigAdapter):
+    await create_yml_files_legacy()
 
     # This init_logging() call is important, to skip over the missing config warnings.
-    init_logging("hummingbot_logs.yml")
+    init_logging("hummingbot_logs.yml", client_config_map)
 
-    await read_system_configs_from_yml()
+    AllConnectorSettings.initialize_paper_trade_settings(client_config_map.paper_trade.paper_trade_exchanges)
 
-    AllConnectorSettings.initialize_paper_trade_settings(global_config_map.get("paper_trade_exchanges").value)
-
-    hb = HummingbotApplication.main_application()
+    hb = HummingbotApplication.main_application(client_config_map)
 
     # The listener needs to have a named variable for keeping reference, since the event listener system
     # uses weak references to remove unneeded listeners.
@@ -74,10 +65,10 @@ async def main():
     hb.app.add_listener(HummingbotUIEvent.Start, start_listener)
 
     tasks: List[Coroutine] = [hb.run()]
-    if global_config_map.get("debug_console").value:
+    if client_config_map.debug_console:
         if not hasattr(__builtins__, "help"):
             import _sitebuiltins
-            __builtins__.help = _sitebuiltins._Helper()
+            __builtins__["help"] = _sitebuiltins._Helper()
 
         from hummingbot.core.management.console import start_management_console
         management_port: int = detect_available_port(8211)
@@ -85,8 +76,24 @@ async def main():
     await safe_gather(*tasks)
 
 
-if __name__ == "__main__":
+def main():
     chdir_to_data_directory()
-    if login_prompt():
+    secrets_manager_cls = ETHKeyFileSecretManger
+
+    try:
         ev_loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
-        ev_loop.run_until_complete(main())
+    except Exception:
+        ev_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+        asyncio.set_event_loop(ev_loop)
+
+    # We need to load a default style for the login screen because the password is required to load the
+    # real configuration now that it can include secret parameters
+    style = load_style(ClientConfigAdapter(ClientConfigMap()))
+
+    if login_prompt(secrets_manager_cls, style=style):
+        client_config_map = load_client_config_map_from_file()
+        ev_loop.run_until_complete(main_async(client_config_map))
+
+
+if __name__ == "__main__":
+    main()

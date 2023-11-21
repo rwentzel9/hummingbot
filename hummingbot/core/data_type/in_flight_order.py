@@ -24,10 +24,14 @@ class OrderState(Enum):
     PENDING_CREATE = 0
     OPEN = 1
     PENDING_CANCEL = 2
-    CANCELLED = 3
+    CANCELED = 3
     PARTIALLY_FILLED = 4
     FILLED = 5
     FAILED = 6
+    PENDING_APPROVAL = 7
+    APPROVED = 8
+    CREATED = 9
+    COMPLETED = 10
 
 
 class OrderUpdate(NamedTuple):
@@ -36,6 +40,7 @@ class OrderUpdate(NamedTuple):
     new_state: OrderState
     client_order_id: Optional[str] = None
     exchange_order_id: Optional[str] = None
+    misc_updates: Optional[Dict[str, Any]] = None
 
 
 class TradeUpdate(NamedTuple):
@@ -48,6 +53,7 @@ class TradeUpdate(NamedTuple):
     fill_base_amount: Decimal
     fill_quote_amount: Decimal
     fee: TradeFeeBase
+    is_taker: bool = True  # CEXs deliver trade events from the taker's perspective
 
     @property
     def fee_asset(self):
@@ -118,6 +124,8 @@ class InFlightOrder:
         if self.exchange_order_id:
             self.exchange_order_id_update_event.set()
         self.completely_filled_event = asyncio.Event()
+        self.processed_by_exchange_event = asyncio.Event()
+        self.check_processed_by_exchange_condition()
 
     @property
     def attributes(self) -> Tuple[Any]:
@@ -170,7 +178,7 @@ class InFlightOrder:
     @property
     def is_done(self) -> bool:
         return (
-            self.current_state in {OrderState.CANCELLED, OrderState.FILLED, OrderState.FAILED}
+            self.current_state in {OrderState.CANCELED, OrderState.FILLED, OrderState.FAILED}
             or math.isclose(self.executed_amount_base, self.amount)
             or self.executed_amount_base >= self.amount
         )
@@ -191,7 +199,7 @@ class InFlightOrder:
 
     @property
     def is_cancelled(self) -> bool:
-        return self.current_state == OrderState.CANCELLED
+        return self.current_state == OrderState.CANCELED
 
     @property
     def average_executed_price(self) -> Optional[Decimal]:
@@ -229,8 +237,10 @@ class InFlightOrder:
         order.order_fills.update({key: TradeUpdate.from_json(value)
                                   for key, value
                                   in data.get("order_fills", {}).items()})
+        order.last_update_timestamp = data.get("last_update_timestamp", order.creation_timestamp)
 
         order.check_filled_condition()
+        order.check_processed_by_exchange_condition()
 
         return order
 
@@ -253,6 +263,7 @@ class InFlightOrder:
             "leverage": str(self.leverage),
             "position": self.position.value,
             "creation_timestamp": self.creation_timestamp,
+            "last_update_timestamp": self.last_update_timestamp,
             "order_fills": {key: fill.to_json() for key, fill in self.order_fills.items()}
         }
 
@@ -297,7 +308,8 @@ class InFlightOrder:
                 price=trade_update.fill_price,
                 order_amount=trade_update.fill_base_amount,
                 token=token,
-                exchange=exchange)
+                exchange=exchange
+            )
 
         return total_fee_in_token
 
@@ -312,10 +324,11 @@ class InFlightOrder:
 
         prev_data = (self.exchange_order_id, self.current_state)
 
-        if self.exchange_order_id is None:
+        if self.exchange_order_id is None and order_update.exchange_order_id is not None:
             self.update_exchange_order_id(order_update.exchange_order_id)
 
         self.current_state = order_update.new_state
+        self.check_processed_by_exchange_condition()
 
         updated: bool = prev_data != (self.exchange_order_id, self.current_state)
 
@@ -352,3 +365,24 @@ class InFlightOrder:
 
     async def wait_until_completely_filled(self):
         await self.completely_filled_event.wait()
+
+    def check_processed_by_exchange_condition(self):
+        if self.current_state.value > OrderState.PENDING_CREATE.value:
+            self.processed_by_exchange_event.set()
+
+    async def wait_until_processed_by_exchange(self):
+        await self.processed_by_exchange_event.wait()
+
+    def build_order_created_message(self) -> str:
+        return (
+            f"Created {self.order_type.name.upper()} {self.trade_type.name.upper()} order "
+            f"{self.client_order_id} for {self.amount} {self.trading_pair}."
+        )
+
+
+class PerpetualDerivativeInFlightOrder(InFlightOrder):
+    def build_order_created_message(self) -> str:
+        return (
+            f"Created {self.order_type.name.upper()} {self.trade_type.name.upper()} order "
+            f"{self.client_order_id} for {self.amount} to {self.position.name.upper()} a {self.trading_pair} position."
+        )

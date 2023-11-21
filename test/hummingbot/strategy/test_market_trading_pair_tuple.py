@@ -6,11 +6,11 @@ from typing import List
 
 import pandas as pd
 
+from hummingbot.client.config.client_config_map import ClientConfigMap
+from hummingbot.client.config.config_helpers import ClientConfigAdapter
 from hummingbot.connector.exchange.paper_trade.paper_trade_exchange import QuantizationParams
-from hummingbot.core.clock import (
-    Clock,
-    ClockMode,
-)
+from hummingbot.connector.test_support.mock_paper_exchange import MockPaperExchange
+from hummingbot.core.clock import Clock, ClockMode
 from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.core.data_type.limit_order import LimitOrder
 from hummingbot.core.data_type.order_book import OrderBook
@@ -24,7 +24,6 @@ from hummingbot.core.event.events import (
     SellOrderCompletedEvent,
 )
 from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
-from test.mock.mock_paper_exchange import MockPaperExchange
 
 s_decimal_0 = Decimal(0)
 
@@ -44,7 +43,9 @@ class MarketTradingPairTupleUnitTest(unittest.TestCase):
 
     def setUp(self):
         self.clock: Clock = Clock(ClockMode.BACKTEST, self.clock_tick_size, self.start_timestamp, self.end_timestamp)
-        self.market: MockPaperExchange = MockPaperExchange()
+        self.market: MockPaperExchange = MockPaperExchange(
+            client_config_map=ClientConfigAdapter(ClientConfigMap())
+        )
         self.market.set_balanced_order_book(trading_pair=self.trading_pair,
                                             mid_price=100,
                                             min_price=50,
@@ -274,14 +275,14 @@ class MarketTradingPairTupleUnitTest(unittest.TestCase):
 
     def test_vwap_for_volume(self):
         # Check VWAP on BUY sell
-        order_volume: Decimal = Decimal("15")
+        order_volume = 15
         filled_orders: List[OrderBookRow] = self.market.get_order_book(self.trading_pair).simulate_buy(order_volume)
         expected_vwap: Decimal = sum([Decimal(o.price) * Decimal(o.amount) for o in filled_orders]) / order_volume
 
         self.assertAlmostEqual(expected_vwap, self.market_info.get_vwap_for_volume(True, order_volume).result_price, 3)
 
         # Check VWAP on SELL side
-        order_volume: Decimal = Decimal("15")
+        order_volume = 15
         filled_orders: List[OrderBookRow] = self.market.get_order_book(self.trading_pair).simulate_sell(order_volume)
         expected_vwap: Decimal = sum([Decimal(o.price) * Decimal(o.amount) for o in filled_orders]) / order_volume
 
@@ -289,14 +290,14 @@ class MarketTradingPairTupleUnitTest(unittest.TestCase):
 
     def test_get_price_for_volume(self):
         # Check price on BUY sell
-        order_volume: Decimal = Decimal("15")
+        order_volume = 15
         filled_orders: List[OrderBookRow] = self.market.get_order_book(self.trading_pair).simulate_buy(order_volume)
         expected_buy_price: Decimal = max([Decimal(o.price) for o in filled_orders])
 
         self.assertAlmostEqual(expected_buy_price, self.market_info.get_price_for_volume(True, order_volume).result_price, 3)
 
         # Check price on SELL side
-        order_volume: Decimal = Decimal("15")
+        order_volume = 15
         filled_orders: List[OrderBookRow] = self.market.get_order_book(self.trading_pair).simulate_sell(order_volume)
         expected_sell_price: Decimal = min([Decimal(o.price) for o in filled_orders])
 
